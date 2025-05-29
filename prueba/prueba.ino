@@ -15,6 +15,7 @@
 
 #include <WiFi.h>
 #include <BlynkSimpleEsp32.h>
+#include <ESP32Servo.h>  // Librería para servo en ESP32
 
 // Wi-Fi
 char ssid[] = "Kaiac";
@@ -40,6 +41,11 @@ const int sensorPin2 = 17;
 unsigned long lastDistTime = 0;
 float distancia_cm = 0;
 
+// Variables para servo
+#define SERVO_PIN 21
+Servo servo;
+volatile int anguloServo = 90; // posición inicial en 90 grados
+
 // ISR para sensor 1
 void IRAM_ATTR pulseISR1() {
   pulseCount1++;
@@ -64,9 +70,16 @@ BLYNK_WRITE(V5) {
   Serial.println(y);
 }
 
+// Lectura del ángulo para servo (V6)
+BLYNK_WRITE(V6) {
+  anguloServo = param.asInt();
+  if (anguloServo < 0) anguloServo = 0;
+  if (anguloServo > 180) anguloServo = 180;
+  Serial.print("Servo angle: ");
+  Serial.println(anguloServo);
+}
+
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
-
-
 
 // Tarea sensores RPM y ultrasonido
 void taskSensores(void *pvParameters) {
@@ -165,6 +178,14 @@ void taskMotores(void *pvParameters) {
   }
 }
 
+// Tarea control servo
+void taskServo(void *pvParameters) {
+  for (;;) {
+    servo.write(anguloServo);
+    vTaskDelay(50 / portTICK_PERIOD_MS); // actualizar cada 50 ms
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -189,6 +210,11 @@ void setup() {
   // Ultrasonido
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
+
+  // Servo con ESP32Servo
+  servo.setPeriodHertz(50);  // 50 Hz para servo estándar
+  servo.attach(SERVO_PIN, 500, 2400); // rango en µs (ajustable según tu servo)
+  servo.write(anguloServo);
 
   // WiFi
   WiFi.begin(ssid, pass);
@@ -224,6 +250,16 @@ void setup() {
     taskMotores,
     "Motores",
     2048,
+    NULL,
+    1,
+    NULL,
+    1
+  );
+
+  xTaskCreatePinnedToCore(
+    taskServo,
+    "Servo",
+    1024,
     NULL,
     1,
     NULL,
