@@ -1,6 +1,6 @@
-#define BLYNK_TEMPLATE_ID "TMPL5RI12qGXX"
-#define BLYNK_TEMPLATE_NAME "Quickstart Template"
-#define BLYNK_AUTH_TOKEN "Ud6HBga4wFKKEy97he586quXD6iOL7HY"
+#define BLYNK_TEMPLATE_ID "TMPL5MWttFeMx"
+#define BLYNK_TEMPLATE_NAME "Coche Rin"
+#define BLYNK_AUTH_TOKEN "dlwEjUa4l-nA9EjIrG2_YwlpFlIstlgx"
 #define TRIG_PIN 26
 #define ECHO_PIN 27
 // Pines del L293D para motor A
@@ -14,12 +14,22 @@
 #define ENB 13 // PWM canal 1
 
 #include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>  
+// Blynk:
 #include <BlynkSimpleEsp32.h>
-#include <ESP32Servo.h>  // Librería para servo en ESP32
 
 // Wi-Fi
 char ssid[] = "Kaiac";
 char pass[] = "62mari2lasucla";
+
+// MQTT Broker
+const char* mqtt_server = "broker.hivemq.com"; 
+const int mqtt_port = 1883;
+const char* mqtt_topic = "giirob/rin/coche";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
 
 // Variables globales para joystick
 volatile int x = 0;
@@ -41,10 +51,7 @@ const int sensorPin2 = 17;
 unsigned long lastDistTime = 0;
 float distancia_cm = 0;
 
-// Variables para servo
-#define SERVO_PIN 21
-Servo servo;
-volatile int anguloServo = 90; // posición inicial en 90 grados
+unsigned long lastMQTTPublishTime = 0; // Para controlar envío MQTT
 
 // ISR para sensor 1
 void IRAM_ATTR pulseISR1() {
@@ -70,16 +77,46 @@ BLYNK_WRITE(V5) {
   Serial.println(y);
 }
 
-// Lectura del ángulo para servo (V6)
-BLYNK_WRITE(V6) {
-  anguloServo = param.asInt();
-  if (anguloServo < 0) anguloServo = 0;
-  if (anguloServo > 180) anguloServo = 180;
-  Serial.print("Servo angle: ");
-  Serial.println(anguloServo);
+portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+
+void reconnectMQTT() {
+  while (!client.connected()) {
+    Serial.print("Intentando conexión MQTT...");
+    String clientId = "ESP32Client-" + String(random(0xffff), HEX);
+    if (client.connect(clientId.c_str())) {
+      Serial.println("conectado");
+      // Puedes suscribirte si quieres, ej:
+      // client.subscribe("otro_topic");
+    } else {
+      Serial.print("falló, rc=");
+      Serial.print(client.state());
+      Serial.println(" intentando de nuevo en 5 segundos");
+      delay(5000);
+    }
+  }
 }
 
-portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+// Función para enviar JSON MQTT
+void publicarDatosMQTT() {
+  if (!client.connected()) {
+    reconnectMQTT();
+  }
+  client.loop();
+
+  StaticJsonDocument<200> doc;
+  doc["rpm1"] = rpm1;
+  doc["rpm2"] = rpm2;
+  doc["distancia_cm"] = distancia_cm;
+
+  char buffer[256];
+  size_t n = serializeJson(doc, buffer);
+  if (client.publish(mqtt_topic, buffer, n)) {
+    Serial.println("Publicado JSON MQTT:");
+    Serial.println(buffer);
+  } else {
+    Serial.println("Error al publicar MQTT");
+  }
+}
 
 // Tarea sensores RPM y ultrasonido
 void taskSensores(void *pvParameters) {
@@ -131,8 +168,14 @@ void taskSensores(void *pvParameters) {
       Serial.print("Distancia: ");
       Serial.print(distancia_cm);
       Serial.println(" cm");
-      Blynk.virtualWrite(V9, distancia_cm);
+      Blynk.virtualWrite(V3, distancia_cm);
       lastDistTime = currentTime;
+    }
+
+    // Enviar datos MQTT cada 2 segundos
+    if (currentTime - lastMQTTPublishTime >= 2000) {
+      publicarDatosMQTT();
+      lastMQTTPublishTime = currentTime;
     }
 
     vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -178,14 +221,6 @@ void taskMotores(void *pvParameters) {
   }
 }
 
-// Tarea control servo
-void taskServo(void *pvParameters) {
-  for (;;) {
-    servo.write(anguloServo);
-    vTaskDelay(50 / portTICK_PERIOD_MS); // actualizar cada 50 ms
-  }
-}
-
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -211,11 +246,6 @@ void setup() {
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
 
-  // Servo con ESP32Servo
-  servo.setPeriodHertz(50);  // 50 Hz para servo estándar
-  servo.attach(SERVO_PIN, 500, 2400); // rango en µs (ajustable según tu servo)
-  servo.write(anguloServo);
-
   // WiFi
   WiFi.begin(ssid, pass);
   Serial.print("Conectando a WiFi");
@@ -227,6 +257,9 @@ void setup() {
   Serial.print("📶 Dirección IP: ");
   Serial.println(WiFi.localIP());
 
+  // MQTT
+  client.setServer(mqtt_server, mqtt_port);
+
   // Blynk
   Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
   Serial.println("🔗 Conectando a Blynk...");
@@ -234,6 +267,7 @@ void setup() {
   lastTime1 = millis();
   lastTime2 = millis();
   lastDistTime = millis();
+  lastMQTTPublishTime = millis();
 
   // Crear tareas FreeRTOS
   xTaskCreatePinnedToCore(
@@ -255,19 +289,13 @@ void setup() {
     NULL,
     1
   );
-
-  xTaskCreatePinnedToCore(
-    taskServo,
-    "Servo",
-    1024,
-    NULL,
-    1,
-    NULL,
-    1
-  );
 }
 
 void loop() {
   Blynk.run();
+  if (!client.connected()) {
+    reconnectMQTT();
+  }
+  client.loop();
   delay(10);
 }
